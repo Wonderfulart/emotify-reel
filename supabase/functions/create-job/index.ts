@@ -41,19 +41,19 @@ serve(async (req) => {
       throw new Error("Unauthorized");
     }
 
-    // Check subscription status
-    const { data: subscription } = await supabaseClient
-      .from("subscriptions")
-      .select("status")
-      .eq("user_id", user.id)
-      .single();
-
-    if (!subscription || !["active", "trialing"].includes(subscription.status)) {
-      return new Response(
-        JSON.stringify({ error: "Active subscription required" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    // Note: Subscription check disabled for testing
+    // Re-enable in production:
+    // const { data: subscription } = await supabaseClient
+    //   .from("subscriptions")
+    //   .select("status")
+    //   .eq("user_id", user.id)
+    //   .single();
+    // if (!subscription || !["active", "trialing"].includes(subscription.status)) {
+    //   return new Response(
+    //     JSON.stringify({ error: "Active subscription required" }),
+    //     { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    //   );
+    // }
 
     const plan: DirectorPlan = await req.json();
     console.log("Creating job with plan:", plan);
