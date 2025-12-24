@@ -10,7 +10,7 @@ verify_jwt = true
 verify_jwt = false
 
 [functions.create-job]
-verify_jwt = true
+verify_jwt = false
 
 [functions.process-job]
 verify_jwt = true
