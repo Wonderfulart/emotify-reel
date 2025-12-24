@@ -1,0 +1,22 @@
+project_id = "lghddquppxnlcveixnrg"
+
+[functions.create-checkout-session]
+verify_jwt = true
+
+[functions.create-portal-session]
+verify_jwt = true
+
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.create-job]
+verify_jwt = true
+
+[functions.process-job]
+verify_jwt = true
+
+[functions.finalize-job]
+verify_jwt = true
+
+[functions.job-status]
+verify_jwt = true
