@@ -17,7 +17,7 @@ import type { Emotion, UploadState, JobStatus } from '@/types/veosync';
 type Step = 'emotion' | 'upload' | 'generate' | 'result';
 
 const Index = () => {
-  const { user, loading: authLoading } = useAuth();
+  const { user, session, loading: authLoading } = useAuth();
   const { isActive, loading: subLoading } = useSubscription(user?.id);
   
   const [step, setStep] = useState<Step>('emotion');
@@ -58,6 +58,18 @@ const Index = () => {
   const handleGenerate = async () => {
     if (!emotion || !uploads.selfie || !uploads.audio || !user) return;
     
+    // Validate session before proceeding
+    if (!session?.access_token) {
+      console.error('No active session or access token');
+      toast.error('Session expired. Please log in again.');
+      return;
+    }
+    
+    console.log('=== GENERATE DEBUG ===');
+    console.log('User ID:', user.id);
+    console.log('Session exists:', !!session);
+    console.log('Access token (first 50 chars):', session.access_token?.substring(0, 50));
+    
     setLocalStatus('running');
     
     try {
@@ -68,6 +80,8 @@ const Index = () => {
         uploadFile(uploads.audio, 'audio'),
       ]);
 
+      console.log('Files uploaded, creating job...');
+      
       // Create job
       const { data: createData, error: createError } = await supabase.functions.invoke('create-job', {
         body: {
@@ -78,6 +92,8 @@ const Index = () => {
           lyrics: uploads.lyrics || undefined,
         },
       });
+
+      console.log('Create job response:', { data: createData, error: createError });
 
       if (createError) throw createError;
       

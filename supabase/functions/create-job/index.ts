@@ -23,23 +23,37 @@ serve(async (req) => {
   }
 
   try {
+    console.log("=== CREATE-JOB DEBUG ===");
+    console.log("Request method:", req.method);
+    console.log("Headers:", Object.fromEntries(req.headers.entries()));
+    
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_ANON_KEY") ?? ""
     );
 
     const authHeader = req.headers.get("Authorization");
+    console.log("Auth header present:", !!authHeader);
+    console.log("Auth header value (first 50 chars):", authHeader?.substring(0, 50));
+    
     if (!authHeader) {
+      console.error("No authorization header found");
       throw new Error("No authorization header");
     }
 
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(
-      authHeader.replace("Bearer ", "")
-    );
+    const token = authHeader.replace("Bearer ", "");
+    console.log("Token length:", token.length);
+    
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
+    
+    console.log("Auth result - user:", user?.id, "error:", authError?.message);
 
     if (authError || !user) {
+      console.error("Auth failed:", authError?.message || "No user returned");
       throw new Error("Unauthorized");
     }
+    
+    console.log("User authenticated:", user.id, user.email);
 
     // Note: Subscription check disabled for testing
     // Re-enable in production:
