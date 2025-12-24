@@ -168,10 +168,10 @@ const Index = () => {
     return <AuthScreen />;
   }
 
-  // Subscription required
-  if (!isActive) {
-    return <PaywallScreen />;
-  }
+  // Subscription required (bypassed for testing)
+  // if (!isActive) {
+  //   return <PaywallScreen />;
+  // }
 
   return (
     <div className="min-h-screen bg-background pt-16">
