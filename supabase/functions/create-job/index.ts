@@ -27,9 +27,16 @@ serve(async (req) => {
     console.log("Request method:", req.method);
     console.log("Headers:", Object.fromEntries(req.headers.entries()));
     
+    // Auth client for user verification
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_ANON_KEY") ?? ""
+    );
+
+    // Admin client for database operations (bypasses RLS)
+    const supabaseAdmin = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
     const authHeader = req.headers.get("Authorization");
@@ -72,8 +79,8 @@ serve(async (req) => {
     const plan: DirectorPlan = await req.json();
     console.log("Creating job with plan:", plan);
 
-    // Create job record
-    const { data: job, error: jobError } = await supabaseClient
+    // Create job record using admin client (bypasses RLS - we already verified user)
+    const { data: job, error: jobError } = await supabaseAdmin
       .from("jobs")
       .insert({
         user_id: user.id,
