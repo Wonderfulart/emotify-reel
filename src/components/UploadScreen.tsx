@@ -101,7 +101,7 @@ export function UploadScreen({ uploads, onUpdateUploads, onContinue, onBack }: U
             <input
               ref={audioInputRef}
               type="file"
-              accept="audio/*"
+              accept="audio/*,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/m4a,.mp3,.wav,.m4a"
               onChange={handleAudioChange}
               className="hidden"
             />
