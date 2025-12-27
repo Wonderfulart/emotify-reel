@@ -214,10 +214,10 @@ const Index = forwardRef<HTMLDivElement, object>(function Index(_, ref) {
     );
   }
 
-  // Auth required
-  if (!user) {
-    return <AuthScreen />;
-  }
+  // Auth bypassed for testing
+  // if (!user) {
+  //   return <AuthScreen />;
+  // }
 
   // Subscription required (bypassed for testing)
   // if (!isActive) {
