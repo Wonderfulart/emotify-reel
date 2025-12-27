@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useState, forwardRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/hooks/useAuth';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 
-export function AuthScreen() {
+export const AuthScreen = forwardRef<HTMLDivElement, object>(function AuthScreen(_, ref) {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [magicLinkSent, setMagicLinkSent] = useState(false);
@@ -36,7 +36,7 @@ export function AuthScreen() {
 
   if (magicLinkSent) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
+      <div ref={ref} className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
         <div className="w-full max-w-sm animate-fade-in text-center">
           <div className="mb-6 text-6xl">✉️</div>
           <h1 className="mb-2 font-display text-4xl tracking-wider text-foreground">
@@ -57,7 +57,7 @@ export function AuthScreen() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
+    <div ref={ref} className="flex min-h-screen flex-col items-center justify-center px-4 py-8">
       <div className="w-full max-w-sm animate-fade-in">
         <div className="mb-8 text-center">
           <h1 className="mb-2 font-display text-6xl tracking-wider gradient-text">
@@ -128,4 +128,6 @@ export function AuthScreen() {
       </div>
     </div>
   );
-}
+});
+
+AuthScreen.displayName = 'AuthScreen';

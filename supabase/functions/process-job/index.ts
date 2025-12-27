@@ -6,6 +6,44 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Logging helper
+function log(level: 'info' | 'warn' | 'error', message: string, context?: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const logEntry = JSON.stringify({ timestamp, level, message, ...context });
+  if (level === 'error') {
+    console.error(logEntry);
+  } else if (level === 'warn') {
+    console.warn(logEntry);
+  } else {
+    console.log(logEntry);
+  }
+}
+
+// Retry helper with exponential backoff
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number; context?: string } = {}
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000, context = 'operation' } = options;
+  let lastError: Error | null = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      log('warn', `${context} failed (attempt ${attempt}/${maxRetries})`, { error: lastError.message });
+      
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
 interface AssemblyClip {
   url: string;
   type: string;
@@ -31,11 +69,20 @@ interface StoryboardScene {
   duration_sec: number;
 }
 
+// Validate required environment variables
+function validateEnv() {
+  const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
+  const missing = required.filter(key => !Deno.env.get(key));
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+}
+
 // Google OAuth2 token generation using service account
 async function getGoogleAccessToken(): Promise<string | null> {
   const serviceAccountJson = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON");
   if (!serviceAccountJson) {
-    console.log("No GOOGLE_SERVICE_ACCOUNT_JSON configured");
+    log('info', 'No GOOGLE_SERVICE_ACCOUNT_JSON configured, skipping Vertex AI');
     return null;
   }
 
@@ -43,13 +90,7 @@ async function getGoogleAccessToken(): Promise<string | null> {
     const serviceAccount = JSON.parse(serviceAccountJson);
     const now = Math.floor(Date.now() / 1000);
     
-    // Create JWT header
-    const header = {
-      alg: "RS256",
-      typ: "JWT",
-    };
-    
-    // Create JWT claims
+    const header = { alg: "RS256", typ: "JWT" };
     const claims = {
       iss: serviceAccount.client_email,
       sub: serviceAccount.client_email,
@@ -59,7 +100,6 @@ async function getGoogleAccessToken(): Promise<string | null> {
       scope: "https://www.googleapis.com/auth/cloud-platform",
     };
     
-    // Base64url encode helper
     const base64UrlEncode = (data: Uint8Array): string => {
       return btoa(String.fromCharCode(...data))
         .replace(/\+/g, "-")
@@ -70,10 +110,8 @@ async function getGoogleAccessToken(): Promise<string | null> {
     const encoder = new TextEncoder();
     const headerB64 = base64UrlEncode(encoder.encode(JSON.stringify(header)));
     const claimsB64 = base64UrlEncode(encoder.encode(JSON.stringify(claims)));
-    
     const signatureInput = `${headerB64}.${claimsB64}`;
     
-    // Import private key and sign
     const pemContents = serviceAccount.private_key
       .replace("-----BEGIN PRIVATE KEY-----", "")
       .replace("-----END PRIVATE KEY-----", "")
@@ -96,10 +134,8 @@ async function getGoogleAccessToken(): Promise<string | null> {
     );
     
     const signatureB64 = base64UrlEncode(new Uint8Array(signature));
-    
     const jwt = `${signatureInput}.${signatureB64}`;
     
-    // Exchange JWT for access token
     const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -111,79 +147,93 @@ async function getGoogleAccessToken(): Promise<string | null> {
     
     if (!tokenResponse.ok) {
       const err = await tokenResponse.text();
-      console.error("OAuth2 token error:", err);
+      log('error', 'OAuth2 token error', { error: err });
       return null;
     }
     
     const tokenData = await tokenResponse.json();
-    console.log("Successfully obtained Google access token");
+    log('info', 'Successfully obtained Google access token');
     return tokenData.access_token;
   } catch (error) {
-    console.error("Error generating Google access token:", error);
+    log('error', 'Error generating Google access token', { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
 
-// Generate storyboard using OpenAI
+// Generate storyboard using OpenAI with retry
 async function generateStoryboard(emotion: string, lyrics: string | null): Promise<StoryboardScene[]> {
   const openaiKey = Deno.env.get("OPEN_AI_KEY");
   if (!openaiKey) {
-    console.log("No OpenAI key, using default storyboard");
+    log('info', 'No OpenAI key, using default storyboard');
     return getDefaultStoryboard(emotion);
   }
 
   try {
-    console.log("Generating storyboard with OpenAI...");
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${openaiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a music video director. Create a storyboard with 3-4 scenes for a short-form vertical video.
+    const result = await withRetry(async () => {
+      log('info', 'Generating storyboard with OpenAI', { emotion });
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+      
+      try {
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${openaiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content: `You are a music video director. Create a storyboard with 3-4 scenes for a short-form vertical video.
 Return JSON array with scenes. Each scene has: type ("avatar" for lip-sync or "broll" for b-roll footage), prompt (visual description for AI video generation), duration_sec (2-4 seconds each).
 Avatar scenes show the performer singing. B-roll scenes are cinematic visuals matching the mood.
 Total duration should be 10-15 seconds. Start and end with avatar scenes, b-roll in between.`
-          },
-          {
-            role: "user",
-            content: `Create a storyboard for a ${emotion} music video.${lyrics ? ` Lyrics: "${lyrics}"` : ""}`
-          }
-        ],
-        response_format: { type: "json_object" },
-        max_tokens: 500,
-      }),
-    });
+              },
+              {
+                role: "user",
+                content: `Create a storyboard for a ${emotion} music video.${lyrics ? ` Lyrics: "${lyrics}"` : ""}`
+              }
+            ],
+            response_format: { type: "json_object" },
+            max_tokens: 500,
+          }),
+          signal: controller.signal,
+        });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OpenAI error:", err);
-      return getDefaultStoryboard(emotion);
-    }
+        clearTimeout(timeoutId);
 
-    const data = await response.json();
-    const content = JSON.parse(data.choices[0].message.content);
-    console.log("Storyboard generated:", content);
-    return content.scenes || content;
+        if (!response.ok) {
+          const err = await response.text();
+          throw new Error(`OpenAI API error: ${response.status} - ${err}`);
+        }
+
+        const data = await response.json();
+        const content = JSON.parse(data.choices[0].message.content);
+        return content.scenes || content;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }, { maxRetries: 3, context: 'OpenAI storyboard generation' });
+    
+    log('info', 'Storyboard generated', { sceneCount: result.length });
+    return result;
   } catch (error) {
-    console.error("Storyboard generation error:", error);
+    log('error', 'Storyboard generation failed, using defaults', { error: error instanceof Error ? error.message : String(error) });
     return getDefaultStoryboard(emotion);
   }
 }
 
 function getDefaultStoryboard(emotion: string): StoryboardScene[] {
   const emotionVisuals: Record<string, string> = {
-    happy: "bright sunlit meadow with flowers swaying, golden hour lighting",
-    sad: "rain falling on a window, soft blue tones, melancholic atmosphere",
-    angry: "dramatic storm clouds, lightning, intense red and orange hues",
-    love: "soft pink sunset, rose petals floating, romantic dreamy atmosphere",
-    chill: "calm ocean waves at sunset, pastel colors, peaceful vibes",
-    hype: "neon city lights at night, energetic motion blur, vibrant colors",
+    unfiltered: "raw urban street scene, graffiti walls, authentic documentary style",
+    vulnerable: "soft rain on window, intimate bedroom lighting, gentle atmosphere",
+    untouchable: "sleek modern architecture, cold steel and glass, powerful stance",
+    numb: "foggy empty streets, muted colors, detached floating feeling",
+    ascending: "sunrise over mountains, golden light rays, triumphant energy",
+    unhinged: "chaotic neon lights, fast motion blur, wild energy",
   };
 
   return [
@@ -193,168 +243,150 @@ function getDefaultStoryboard(emotion: string): StoryboardScene[] {
   ];
 }
 
-// Generate video clip using Vertex AI Veo 3.1 with OAuth2
+// Generate video clip using Vertex AI Veo 3.1 with retry
 async function generateVeoClip(prompt: string, durationSec: number, accessToken: string): Promise<string | null> {
   const projectId = Deno.env.get("VERTEX_PROJECT_ID");
   const location = Deno.env.get("VERTEX_LOCATION") || "us-central1";
 
   if (!projectId) {
-    console.log("No VERTEX_PROJECT_ID configured, skipping Veo generation");
+    log('info', 'No VERTEX_PROJECT_ID configured, skipping Veo generation');
     return null;
   }
 
   try {
-    console.log("Generating Veo clip:", prompt);
-    
-    // Veo 3.1 API endpoint
-    const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/veo-3.1:predictLongRunning`;
+    return await withRetry(async () => {
+      log('info', 'Generating Veo clip', { prompt: prompt.substring(0, 50) });
+      
+      const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/veo-3.1:predictLongRunning`;
 
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        instances: [{
-          prompt: `${prompt}, vertical 9:16 aspect ratio, cinematic quality, smooth motion`,
-        }],
-        parameters: {
-          aspectRatio: "9:16",
-          durationSeconds: durationSec,
-          numberOfVideos: 1,
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
         },
-      }),
-    });
+        body: JSON.stringify({
+          instances: [{
+            prompt: `${prompt}, vertical 9:16 aspect ratio, cinematic quality, smooth motion`,
+          }],
+          parameters: {
+            aspectRatio: "9:16",
+            durationSeconds: durationSec,
+            numberOfVideos: 1,
+          },
+        }),
+      });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("Veo API error:", response.status, err);
-      return null;
-    }
-
-    const data = await response.json();
-    console.log("Veo response:", JSON.stringify(data).slice(0, 500));
-
-    // Handle long-running operation - poll for completion
-    if (data.name) {
-      const operationId = data.name;
-      let attempts = 0;
-      const maxAttempts = 60; // 5 minutes max
-
-      while (attempts < maxAttempts) {
-        await new Promise(r => setTimeout(r, 5000)); // Wait 5 seconds
-        
-        const statusResp = await fetch(
-          `https://${location}-aiplatform.googleapis.com/v1/${operationId}`,
-          {
-            headers: { "Authorization": `Bearer ${accessToken}` },
-          }
-        );
-        
-        const statusData = await statusResp.json();
-        console.log("Veo operation status:", statusData.done ? "done" : "pending");
-        
-        if (statusData.done) {
-          if (statusData.response?.predictions?.[0]?.videoUri) {
-            return statusData.response.predictions[0].videoUri;
-          }
-          if (statusData.response?.predictions?.[0]?.video) {
-            // Base64 encoded video - would need to upload to storage
-            console.log("Received base64 video, needs upload handling");
-            return null;
-          }
-          break;
-        }
-        attempts++;
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Veo API error: ${response.status} - ${err}`);
       }
-    }
 
-    return null;
+      const data = await response.json();
+
+      // Handle long-running operation
+      if (data.name) {
+        const operationId = data.name;
+        let attempts = 0;
+        const maxAttempts = 60;
+
+        while (attempts < maxAttempts) {
+          await new Promise(r => setTimeout(r, 5000));
+          
+          const statusResp = await fetch(
+            `https://${location}-aiplatform.googleapis.com/v1/${operationId}`,
+            { headers: { "Authorization": `Bearer ${accessToken}` } }
+          );
+          
+          const statusData = await statusResp.json();
+          
+          if (statusData.done) {
+            if (statusData.response?.predictions?.[0]?.videoUri) {
+              return statusData.response.predictions[0].videoUri;
+            }
+            break;
+          }
+          attempts++;
+        }
+      }
+
+      return null;
+    }, { maxRetries: 2, context: 'Veo clip generation' });
   } catch (error) {
-    console.error("Veo generation error:", error);
+    log('error', 'Veo generation failed', { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
 
-// Generate lip-synced avatar using Sync.so
+// Generate lip-synced avatar using Sync.so with retry
 async function generateLipSync(selfieUrl: string, audioUrl: string): Promise<string | null> {
   const syncApiKey = Deno.env.get("SYNC_SO_API");
   
   if (!syncApiKey) {
-    console.log("No Sync.so API key, skipping lip-sync");
+    log('info', 'No Sync.so API key, skipping lip-sync');
     return null;
   }
 
   try {
-    console.log("Generating lip-sync with Sync.so...");
-    
-    // Create lip-sync job
-    const response = await fetch("https://api.sync.so/v2/generate", {
-      method: "POST",
-      headers: {
-        "x-api-key": syncApiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "lipsync-1.9.0-beta",
-        input: [
-          {
-            type: "video",
-            url: selfieUrl,
-          },
-          {
-            type: "audio",
-            url: audioUrl,
-          },
-        ],
-        options: {
-          output_format: "mp4",
-          aspect_ratio: "9:16",
+    return await withRetry(async () => {
+      log('info', 'Generating lip-sync with Sync.so');
+      
+      const response = await fetch("https://api.sync.so/v2/generate", {
+        method: "POST",
+        headers: {
+          "x-api-key": syncApiKey,
+          "Content-Type": "application/json",
         },
-      }),
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("Sync.so API error:", err);
-      return null;
-    }
-
-    const data = await response.json();
-    console.log("Sync.so job created:", data.id);
-
-    // Poll for completion
-    const jobId = data.id;
-    let attempts = 0;
-    const maxAttempts = 120; // 10 minutes max
-
-    while (attempts < maxAttempts) {
-      await new Promise(r => setTimeout(r, 5000)); // Wait 5 seconds
-      
-      const statusResp = await fetch(`https://api.sync.so/v2/generate/${jobId}`, {
-        headers: { "x-api-key": syncApiKey },
+        body: JSON.stringify({
+          model: "lipsync-1.9.0-beta",
+          input: [
+            { type: "video", url: selfieUrl },
+            { type: "audio", url: audioUrl },
+          ],
+          options: {
+            output_format: "mp4",
+            aspect_ratio: "9:16",
+          },
+        }),
       });
-      
-      const statusData = await statusResp.json();
-      console.log("Sync.so status:", statusData.status);
-      
-      if (statusData.status === "COMPLETED") {
-        return statusData.output_url || statusData.output?.[0]?.url;
-      }
-      
-      if (statusData.status === "FAILED") {
-        console.error("Sync.so job failed:", statusData.error);
-        return null;
-      }
-      
-      attempts++;
-    }
 
-    console.error("Sync.so job timed out");
-    return null;
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Sync.so API error: ${response.status} - ${err}`);
+      }
+
+      const data = await response.json();
+      log('info', 'Sync.so job created', { jobId: data.id });
+
+      // Poll for completion
+      const jobId = data.id;
+      let attempts = 0;
+      const maxAttempts = 120;
+
+      while (attempts < maxAttempts) {
+        await new Promise(r => setTimeout(r, 5000));
+        
+        const statusResp = await fetch(`https://api.sync.so/v2/generate/${jobId}`, {
+          headers: { "x-api-key": syncApiKey },
+        });
+        
+        const statusData = await statusResp.json();
+        
+        if (statusData.status === "COMPLETED") {
+          return statusData.output_url || statusData.output?.[0]?.url;
+        }
+        
+        if (statusData.status === "FAILED") {
+          throw new Error(`Sync.so job failed: ${statusData.error}`);
+        }
+        
+        attempts++;
+      }
+
+      throw new Error("Sync.so job timed out");
+    }, { maxRetries: 2, context: 'Sync.so lip-sync' });
   } catch (error) {
-    console.error("Sync.so error:", error);
+    log('error', 'Lip-sync generation failed', { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
@@ -362,6 +394,17 @@ async function generateLipSync(selfieUrl: string, audioUrl: string): Promise<str
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // Validate environment at startup
+  try {
+    validateEnv();
+  } catch (error) {
+    log('error', 'Environment validation failed', { error: error instanceof Error ? error.message : String(error) });
+    return new Response(
+      JSON.stringify({ error: "Server configuration error" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   const supabaseClient = createClient(
@@ -374,7 +417,10 @@ serve(async (req) => {
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
-      throw new Error("No authorization header");
+      return new Response(
+        JSON.stringify({ error: "No authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const { data: { user }, error: authError } = await supabaseClient.auth.getUser(
@@ -382,12 +428,23 @@ serve(async (req) => {
     );
 
     if (authError || !user) {
-      throw new Error("Unauthorized");
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const body = await req.json();
     jobId = body.job_id;
-    console.log("Processing job:", jobId);
+    
+    if (!jobId) {
+      return new Response(
+        JSON.stringify({ error: "job_id is required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    
+    log('info', 'Processing job', { jobId, userId: user.id });
 
     // Get job details
     const { data: job, error: jobError } = await supabaseClient
@@ -398,7 +455,11 @@ serve(async (req) => {
       .single();
 
     if (jobError || !job) {
-      throw new Error("Job not found");
+      log('error', 'Job not found', { jobId, userId: user.id });
+      return new Response(
+        JSON.stringify({ error: "Job not found" }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     // Update job status to running
@@ -407,21 +468,14 @@ serve(async (req) => {
       .update({ status: "running" })
       .eq("id", jobId);
 
-    console.log("Job status updated to running");
-
-    // =====================================================
-    // REAL AI PIPELINE
-    // =====================================================
+    log('info', 'Job status updated to running', { jobId });
 
     // Step 0: Get Google OAuth2 access token for Vertex AI
     const accessToken = await getGoogleAccessToken();
-    if (!accessToken) {
-      console.log("Warning: Could not obtain Google access token, Veo generation will be skipped");
-    }
 
     // Step 1: Generate storyboard
-    const storyboard = await generateStoryboard(job.emotion || "happy", job.lyrics);
-    console.log("Storyboard ready:", storyboard.length, "scenes");
+    const storyboard = await generateStoryboard(job.emotion || "unfiltered", job.lyrics);
+    log('info', 'Storyboard ready', { jobId, sceneCount: storyboard.length });
 
     // Step 2: Process each scene
     const clips: AssemblyClip[] = [];
@@ -429,34 +483,30 @@ serve(async (req) => {
 
     for (const scene of storyboard) {
       if (scene.type === "avatar") {
-        // Generate lip-synced avatar (only once, reuse for all avatar scenes)
         if (!avatarVideoUrl) {
           avatarVideoUrl = await generateLipSync(job.selfie_url, job.song_url);
         }
         
         clips.push({
-          url: avatarVideoUrl || job.selfie_url, // Fallback to selfie if lip-sync fails
+          url: avatarVideoUrl || job.selfie_url,
           type: "avatar",
           duration_sec: scene.duration_sec,
         });
       } else {
-        // Generate B-roll with Veo (only if we have access token)
         const brollUrl = accessToken 
           ? await generateVeoClip(scene.prompt, scene.duration_sec, accessToken)
           : null;
         
         clips.push({
-          url: brollUrl || job.selfie_url, // Fallback to selfie if Veo fails
+          url: brollUrl || job.selfie_url,
           type: "broll",
           duration_sec: scene.duration_sec,
         });
       }
     }
 
-    // Calculate total duration
     const totalDuration = clips.reduce((sum, c) => sum + (c.duration_sec || 3), 0);
 
-    // Create assembly manifest
     const assembly: AssemblyManifest = {
       clips,
       audio_url: job.song_url,
@@ -470,14 +520,12 @@ serve(async (req) => {
       },
     };
 
-    // Store provider refs for debugging
     const providerRefs = {
       storyboard,
       has_lipsync: !!avatarVideoUrl,
       clips_generated: clips.filter(c => c.url !== job.selfie_url).length,
     };
 
-    // Update job with assembly manifest
     await supabaseClient
       .from("jobs")
       .update({ 
@@ -487,19 +535,15 @@ serve(async (req) => {
       })
       .eq("id", jobId);
 
-    console.log("Job ready for assembly with", clips.length, "clips");
+    log('info', 'Job ready for assembly', { jobId, clipCount: clips.length });
 
     return new Response(
-      JSON.stringify({ 
-        status: "ready_for_assembly",
-        assembly,
-      }),
+      JSON.stringify({ status: "ready_for_assembly", assembly }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
-    console.error("Process job error:", error);
+    log('error', 'Process job error', { jobId, error: error instanceof Error ? error.message : String(error) });
     
-    // Update job status to error
     if (jobId) {
       try {
         const serviceClient = createClient(
@@ -519,7 +563,7 @@ serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({ error: "Processing failed. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

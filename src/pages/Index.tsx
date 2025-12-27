@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, forwardRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { useJob } from '@/hooks/useJob';
@@ -19,7 +19,7 @@ import type { Emotion, UploadState, JobStatus } from '@/types/veosync';
 
 type Step = 'emotion' | 'upload' | 'generate' | 'result';
 
-const Index = () => {
+const Index = forwardRef<HTMLDivElement, object>(function Index(_, ref) {
   const { user, session, loading: authLoading } = useAuth();
   const { isActive, loading: subLoading } = useSubscription(user?.id);
   
@@ -45,7 +45,15 @@ const Index = () => {
 
   const uploadFile = async (file: File, folder: string, fileType: 'selfie' | 'audio'): Promise<string> => {
     // Validate file before upload
-    validateFile(file, fileType);
+    try {
+      validateFile(file, fileType);
+    } catch (error) {
+      if (error instanceof FileValidationError) {
+        toast.error(error.message);
+        throw error;
+      }
+      throw error;
+    }
     
     // Sanitize filename
     const safeName = sanitizeFilename(file.name);
@@ -81,17 +89,14 @@ const Index = () => {
     
     // Validate session before proceeding
     if (!session?.access_token) {
-      console.error('No active session or access token');
+      logger.error('No active session', { userId: user.id });
       toast.error('Session expired. Please log in again.');
       return;
     }
     
-    console.log('=== GENERATE DEBUG ===');
-    console.log('User ID:', user.id);
-    console.log('Session exists:', !!session);
-    console.log('Access token (first 50 chars):', session.access_token?.substring(0, 50));
-    
+    logger.info('Starting generation', { userId: user.id, emotion });
     setLocalStatus('running');
+    setStep('generate');
     
     try {
       // Upload files
@@ -101,7 +106,7 @@ const Index = () => {
         uploadFile(uploads.audio, 'audio', 'audio'),
       ]);
 
-      console.log('Files uploaded, creating job...');
+      logger.info('Files uploaded, creating job', { userId: user.id });
       
       // Create job
       const { data: createData, error: createError } = await supabase.functions.invoke('create-job', {
@@ -114,12 +119,14 @@ const Index = () => {
         },
       });
 
-      console.log('Create job response:', { data: createData, error: createError });
-
-      if (createError) throw createError;
+      if (createError) {
+        logger.error('Create job failed', { userId: user.id, error: createError.message });
+        throw createError;
+      }
       
       const newJobId = createData.job_id;
       setJobId(newJobId);
+      logger.info('Job created', { userId: user.id, jobId: newJobId });
       
       toast.info('Processing your video...');
       
@@ -128,7 +135,10 @@ const Index = () => {
         body: { job_id: newJobId },
       });
 
-      if (processError) throw processError;
+      if (processError) {
+        logger.error('Process job failed', { userId: user.id, jobId: newJobId, error: processError.message });
+        throw processError;
+      }
 
       if (processData.status === 'ready_for_assembly' && processData.assembly) {
         setLocalStatus('assembling');
@@ -143,7 +153,10 @@ const Index = () => {
           .from('outputs')
           .upload(finalPath, videoBlob);
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+          logger.error('Final video upload failed', { userId: user.id, jobId: newJobId, error: uploadError.message });
+          throw uploadError;
+        }
 
         const { data: finalSignedUrl } = await supabase.storage
           .from('outputs')
@@ -160,12 +173,13 @@ const Index = () => {
         setResultUrl(finalSignedUrl?.signedUrl || '');
         setLocalStatus('done');
         setStep('result');
+        logger.info('Video generation complete', { userId: user.id, jobId: newJobId });
         toast.success('Your video is ready!');
       }
     } catch (error) {
-      console.error('Generation error:', error);
+      logger.error('Generation error', { userId: user.id, error: error instanceof Error ? error.message : 'Unknown' });
       setLocalStatus('error');
-      toast.error('Failed to generate video. Please try again.');
+      toast.error(error instanceof FileValidationError ? error.message : 'Failed to generate video. Please try again.');
     }
   };
 
@@ -186,15 +200,15 @@ const Index = () => {
   };
 
   const handleRegenerate = (style: string) => {
+    logger.info('Regenerating with style', { style });
     toast.info(`Regenerating with "${style}" style...`);
-    // Would trigger regeneration with style chip
     handleGenerate();
   };
 
   // Loading state
   if (authLoading || subLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
+      <div ref={ref} className="flex min-h-screen items-center justify-center bg-background">
         <div className="h-12 w-12 animate-spin rounded-full border-4 border-primary border-t-transparent" />
       </div>
     );
@@ -211,7 +225,7 @@ const Index = () => {
   // }
 
   return (
-    <div className="min-h-screen bg-background pt-16">
+    <div ref={ref} className="min-h-screen bg-background pt-16">
       <Header />
       
       {step === 'emotion' && (
@@ -249,6 +263,8 @@ const Index = () => {
       )}
     </div>
   );
-};
+});
+
+Index.displayName = 'Index';
 
 export default Index;
