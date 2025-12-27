@@ -12,6 +12,9 @@ import { ResultScreen } from '@/components/ResultScreen';
 import { Header } from '@/components/Header';
 import { assembleVideo } from '@/lib/ffmpeg';
 import { toast } from 'sonner';
+import { validateFile, sanitizeFilename, FileValidationError } from '@/lib/fileValidation';
+import { logger } from '@/lib/logger';
+import { StorageBuckets, URL_EXPIRY } from '@/lib/constants';
 import type { Emotion, UploadState, JobStatus } from '@/types/veosync';
 
 type Step = 'emotion' | 'upload' | 'generate' | 'result';
@@ -40,17 +43,35 @@ const Index = () => {
     setUploads((prev) => ({ ...prev, ...updates }));
   }, []);
 
-  const uploadFile = async (file: File, folder: string): Promise<string> => {
-    const path = `${user!.id}/${folder}/${Date.now()}_${file.name}`;
+  const uploadFile = async (file: File, folder: string, fileType: 'selfie' | 'audio'): Promise<string> => {
+    // Validate file before upload
+    validateFile(file, fileType);
+    
+    // Sanitize filename
+    const safeName = sanitizeFilename(file.name);
+    const path = `${user!.id}/${folder}/${Date.now()}_${safeName}`;
+    
+    logger.info('Uploading file', { 
+      userId: user!.id, 
+      folder, 
+      fileType, 
+      originalName: file.name,
+      sanitizedName: safeName,
+      size: file.size 
+    });
+    
     const { error } = await supabase.storage
-      .from('uploads')
+      .from(StorageBuckets.UPLOADS)
       .upload(path, file);
     
-    if (error) throw error;
+    if (error) {
+      logger.error('File upload failed', { userId: user!.id, folder, error: error.message });
+      throw error;
+    }
     
     const { data: signedUrl } = await supabase.storage
-      .from('uploads')
-      .createSignedUrl(path, 3600);
+      .from(StorageBuckets.UPLOADS)
+      .createSignedUrl(path, URL_EXPIRY.UPLOAD);
     
     return signedUrl?.signedUrl || '';
   };
@@ -76,8 +97,8 @@ const Index = () => {
       // Upload files
       toast.info('Uploading your files...');
       const [selfieUrl, audioUrl] = await Promise.all([
-        uploadFile(uploads.selfie, 'selfies'),
-        uploadFile(uploads.audio, 'audio'),
+        uploadFile(uploads.selfie, 'selfies', 'selfie'),
+        uploadFile(uploads.audio, 'audio', 'audio'),
       ]);
 
       console.log('Files uploaded, creating job...');

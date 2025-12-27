@@ -6,6 +6,25 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Validate required environment variables at startup
+const REQUIRED_ENV_VARS = [
+  "SUPABASE_URL",
+  "SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+];
+
+function validateEnvVars(): void {
+  const missing = REQUIRED_ENV_VARS.filter(
+    (varName) => !Deno.env.get(varName)
+  );
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
+}
+
+// Validate on cold start
+validateEnvVars();
+
 interface DirectorPlan {
   emotion: string;
   platform: string;
@@ -17,67 +36,117 @@ interface DirectorPlan {
   output?: { duration_sec?: number };
 }
 
+// Simple request body validation
+function validateRequestBody(body: unknown): DirectorPlan {
+  if (!body || typeof body !== "object") {
+    throw new Error("Invalid request body");
+  }
+  
+  const plan = body as Record<string, unknown>;
+  
+  if (!plan.emotion || typeof plan.emotion !== "string") {
+    throw new Error("Missing or invalid 'emotion' field");
+  }
+  if (!plan.selfie_asset_url || typeof plan.selfie_asset_url !== "string") {
+    throw new Error("Missing or invalid 'selfie_asset_url' field");
+  }
+  if (!plan.song_asset_url || typeof plan.song_asset_url !== "string") {
+    throw new Error("Missing or invalid 'song_asset_url' field");
+  }
+  
+  return {
+    emotion: plan.emotion as string,
+    platform: (plan.platform as string) || "9:16",
+    selfie_asset_url: plan.selfie_asset_url as string,
+    song_asset_url: plan.song_asset_url as string,
+    lyrics: plan.lyrics as string | undefined,
+    hero_segments: plan.hero_segments as number[] | undefined,
+    style_chips: plan.style_chips as string[] | undefined,
+    output: plan.output as { duration_sec?: number } | undefined,
+  };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const startTime = Date.now();
+  
   try {
-    console.log("=== CREATE-JOB DEBUG ===");
-    console.log("Request method:", req.method);
-    console.log("Headers:", Object.fromEntries(req.headers.entries()));
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: Request received`);
     
     // Auth client for user verification
     const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? ""
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!
     );
 
     // Admin client for database operations (bypasses RLS)
     const supabaseAdmin = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // Extract and validate auth token
     const authHeader = req.headers.get("Authorization");
-    console.log("Auth header present:", !!authHeader);
-    console.log("Auth header value (first 50 chars):", authHeader?.substring(0, 50));
-    
     if (!authHeader) {
-      console.error("No authorization header found");
-      throw new Error("No authorization header");
+      console.error(`[${new Date().toISOString()}] CREATE-JOB: No authorization header`);
+      return new Response(
+        JSON.stringify({ error: "Authorization required" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     const token = authHeader.replace("Bearer ", "");
-    console.log("Token length:", token.length);
-    
     const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
-    
-    console.log("Auth result - user:", user?.id, "error:", authError?.message);
 
     if (authError || !user) {
-      console.error("Auth failed:", authError?.message || "No user returned");
-      throw new Error("Unauthorized");
+      console.error(`[${new Date().toISOString()}] CREATE-JOB: Auth failed - ${authError?.message || "No user"}`);
+      return new Response(
+        JSON.stringify({ error: "Invalid or expired session" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
     
-    console.log("User authenticated:", user.id, user.email);
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: User authenticated - ${user.id}`);
 
-    // Note: Subscription check disabled for testing
-    // Re-enable in production:
-    // const { data: subscription } = await supabaseClient
-    //   .from("subscriptions")
-    //   .select("status")
-    //   .eq("user_id", user.id)
-    //   .single();
-    // if (!subscription || !["active", "trialing"].includes(subscription.status)) {
+    // Check subscription status (enforce in production)
+    const { data: subscription } = await supabaseAdmin
+      .from("subscriptions")
+      .select("status")
+      .eq("user_id", user.id)
+      .single();
+    
+    // Uncomment for production subscription enforcement:
+    // if (!subscription || !["active", "trialing"].includes(subscription.status ?? "")) {
+    //   console.log(`[${new Date().toISOString()}] CREATE-JOB: Subscription required - user ${user.id}`);
     //   return new Response(
-    //     JSON.stringify({ error: "Active subscription required" }),
-    //     { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    //     JSON.stringify({ 
+    //       error: "Active subscription required",
+    //       code: "SUBSCRIPTION_REQUIRED",
+    //       upgradeUrl: "/billing"
+    //     }),
+    //     { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     //   );
     // }
+    
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: Subscription status - ${subscription?.status || "none"}`);
 
-    const plan: DirectorPlan = await req.json();
-    console.log("Creating job with plan:", plan);
+    // Parse and validate request body
+    let plan: DirectorPlan;
+    try {
+      const rawBody = await req.json();
+      plan = validateRequestBody(rawBody);
+    } catch (parseError) {
+      console.error(`[${new Date().toISOString()}] CREATE-JOB: Invalid request body - ${parseError}`);
+      return new Response(
+        JSON.stringify({ error: parseError instanceof Error ? parseError.message : "Invalid request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: Creating job for emotion "${plan.emotion}"`);
 
     // Create job record using admin client (bypasses RLS - we already verified user)
     const { data: job, error: jobError } = await supabaseAdmin
@@ -94,19 +163,26 @@ serve(async (req) => {
       .single();
 
     if (jobError) {
-      console.error("Failed to create job:", jobError);
-      throw new Error("Failed to create job");
+      console.error(`[${new Date().toISOString()}] CREATE-JOB: Database error - ${jobError.message}`);
+      return new Response(
+        JSON.stringify({ error: "Failed to create job. Please try again." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    console.log("Created job:", job.id);
+    const duration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: Success - job ${job.id} created in ${duration}ms`);
 
     return new Response(JSON.stringify({ job_id: job.id }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
-    console.error("Create job error:", error);
+    const duration = Date.now() - startTime;
+    console.error(`[${new Date().toISOString()}] CREATE-JOB: Unexpected error after ${duration}ms -`, error);
+    
+    // Don't leak internal error details to client
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({ error: "An unexpected error occurred. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

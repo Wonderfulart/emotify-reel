@@ -62,7 +62,24 @@ export function useJob(jobId: string | null) {
   useEffect(() => {
     if (!jobId) return;
 
-    fetchJob();
+    // Fetch job immediately
+    const doFetch = async () => {
+      setLoading(true);
+      const { data, error: fetchError } = await supabase
+        .from('jobs')
+        .select('*')
+        .eq('id', jobId)
+        .single();
+
+      if (fetchError) {
+        setError(fetchError.message);
+      } else if (data) {
+        setJob(parseJob(data as DbJob));
+      }
+      setLoading(false);
+    };
+    
+    doFetch();
 
     // Subscribe to realtime changes
     const channel = supabase
@@ -86,7 +103,7 @@ export function useJob(jobId: string | null) {
     return () => {
       channel.unsubscribe();
     };
-  }, [jobId, fetchJob]);
+  }, [jobId]); // Only depend on jobId - removed fetchJob to prevent memory leak
 
   const updateStatus = async (status: JobStatus) => {
     if (!jobId) return;
