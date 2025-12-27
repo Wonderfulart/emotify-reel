@@ -407,33 +407,15 @@ serve(async (req) => {
     );
   }
 
+  // Use service role key to bypass RLS
   const supabaseClient = createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
-    Deno.env.get("SUPABASE_ANON_KEY") ?? ""
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
   );
 
   let jobId: string | null = null;
 
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: "No authorization header" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(
-      authHeader.replace("Bearer ", "")
-    );
-
-    if (authError || !user) {
-      return new Response(
-        JSON.stringify({ error: "Unauthorized" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
     const body = await req.json();
     jobId = body.job_id;
     
@@ -444,18 +426,17 @@ serve(async (req) => {
       );
     }
     
-    log('info', 'Processing job', { jobId, userId: user.id });
+    log('info', 'Processing job', { jobId });
 
-    // Get job details
+    // Get job details (using service role bypasses RLS)
     const { data: job, error: jobError } = await supabaseClient
       .from("jobs")
       .select("*")
       .eq("id", jobId)
-      .eq("user_id", user.id)
       .single();
 
     if (jobError || !job) {
-      log('error', 'Job not found', { jobId, userId: user.id });
+      log('error', 'Job not found', { jobId, error: jobError?.message });
       return new Response(
         JSON.stringify({ error: "Job not found" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
