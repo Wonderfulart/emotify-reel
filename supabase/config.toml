@@ -13,10 +13,10 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.process-job]
-verify_jwt = true
+verify_jwt = false
 
 [functions.finalize-job]
-verify_jwt = true
+verify_jwt = false
 
 [functions.job-status]
 verify_jwt = true
