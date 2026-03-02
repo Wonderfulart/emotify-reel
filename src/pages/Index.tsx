@@ -19,16 +19,9 @@ import type { Emotion, UploadState, JobStatus } from '@/types/veosync';
 
 type Step = 'emotion' | 'upload' | 'generate' | 'result';
 
-// Mock user for testing when auth is bypassed
-const MOCK_USER = {
-  id: '00000000-0000-0000-0000-000000000000',
-  email: 'test@veosync.dev',
-} as const;
-
 const Index = forwardRef<HTMLDivElement, object>(function Index(_, ref) {
-  const { user: authUser, session, loading: authLoading } = useAuth();
-  const user = authUser ?? MOCK_USER; // Fallback to mock user for testing
-  const { isActive, loading: subLoading } = useSubscription(authUser?.id);
+  const { user, session, loading: authLoading } = useAuth();
+  const { isActive, loading: subLoading } = useSubscription(user?.id);
   
   const [step, setStep] = useState<Step>('emotion');
   const [emotion, setEmotion] = useState<Emotion | null>(null);
@@ -92,7 +85,7 @@ const Index = forwardRef<HTMLDivElement, object>(function Index(_, ref) {
   };
 
   const handleGenerate = async () => {
-    if (!emotion || !uploads.selfie || !uploads.audio) return;
+    if (!emotion || !uploads.selfie || !uploads.audio || !user) return;
     
     logger.info('Starting generation', { userId: user.id, emotion });
     setLocalStatus('running');
@@ -215,10 +208,10 @@ const Index = forwardRef<HTMLDivElement, object>(function Index(_, ref) {
     );
   }
 
-  // Auth bypassed for testing
-  // if (!user) {
-  //   return <AuthScreen />;
-  // }
+  // Require authentication
+  if (!user) {
+    return <AuthScreen />;
+  }
 
   // Subscription required (bypassed for testing)
   // if (!isActive) {
