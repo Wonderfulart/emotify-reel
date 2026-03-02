@@ -2,13 +2,13 @@ import { z } from 'zod';
 
 // File size limits in bytes
 export const FILE_SIZE_LIMITS = {
-  selfie: 10 * 1024 * 1024, // 10MB for images
+  selfie: 50 * 1024 * 1024, // 50MB for images/video selfies
   audio: 100 * 1024 * 1024, // 100MB for audio/video
 } as const;
 
 // Allowed MIME types
 export const ALLOWED_MIME_TYPES = {
-  selfie: ['image/jpeg', 'image/png', 'image/webp'],
+  selfie: ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm'],
   audio: ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/aac', 'audio/x-m4a', 'video/mp4'],
 } as const;
 
@@ -50,7 +50,7 @@ export function validateFile(file: File, type: FileType): void {
   const allowedTypes = ALLOWED_MIME_TYPES[type] as readonly string[];
   if (!allowedTypes.includes(file.type)) {
     const friendlyTypes = type === 'selfie' 
-      ? 'JPEG, PNG, or WebP images'
+      ? 'JPEG, PNG, WebP images or MP4, MOV, WebM videos'
       : 'MP3, WAV, M4A, or MP4 audio files';
     throw new FileValidationError(
       `Invalid file type "${file.type}". Please upload ${friendlyTypes}.`

@@ -6,10 +6,12 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Mock user ID for testing when auth is bypassed
+const MOCK_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 // Validate required environment variables at startup
 const REQUIRED_ENV_VARS = [
   "SUPABASE_URL",
-  "SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
 ];
 
@@ -76,62 +78,35 @@ serve(async (req) => {
   try {
     console.log(`[${new Date().toISOString()}] CREATE-JOB: Request received`);
     
-    // Auth client for user verification
-    const supabaseClient = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!
-    );
-
     // Admin client for database operations (bypasses RLS)
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Extract and validate auth token
+    // Try to authenticate user (optional for testing)
+    let userId = MOCK_USER_ID;
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      console.error(`[${new Date().toISOString()}] CREATE-JOB: No authorization header`);
-      return new Response(
-        JSON.stringify({ error: "Authorization required" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    if (authHeader) {
+      const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+      if (anonKey) {
+        const supabaseClient = createClient(
+          Deno.env.get("SUPABASE_URL")!,
+          anonKey
+        );
+        const token = authHeader.replace("Bearer ", "");
+        const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
+        
+        if (!authError && user) {
+          userId = user.id;
+          console.log(`[${new Date().toISOString()}] CREATE-JOB: User authenticated - ${userId}`);
+        } else {
+          console.log(`[${new Date().toISOString()}] CREATE-JOB: Auth failed, using mock user - ${authError?.message || "No user"}`);
+        }
+      }
+    } else {
+      console.log(`[${new Date().toISOString()}] CREATE-JOB: No auth header, using mock user`);
     }
-
-    const token = authHeader.replace("Bearer ", "");
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
-
-    if (authError || !user) {
-      console.error(`[${new Date().toISOString()}] CREATE-JOB: Auth failed - ${authError?.message || "No user"}`);
-      return new Response(
-        JSON.stringify({ error: "Invalid or expired session" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-    
-    console.log(`[${new Date().toISOString()}] CREATE-JOB: User authenticated - ${user.id}`);
-
-    // Check subscription status (enforce in production)
-    const { data: subscription } = await supabaseAdmin
-      .from("subscriptions")
-      .select("status")
-      .eq("user_id", user.id)
-      .single();
-    
-    // Uncomment for production subscription enforcement:
-    // if (!subscription || !["active", "trialing"].includes(subscription.status ?? "")) {
-    //   console.log(`[${new Date().toISOString()}] CREATE-JOB: Subscription required - user ${user.id}`);
-    //   return new Response(
-    //     JSON.stringify({ 
-    //       error: "Active subscription required",
-    //       code: "SUBSCRIPTION_REQUIRED",
-    //       upgradeUrl: "/billing"
-    //     }),
-    //     { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    //   );
-    // }
-    
-    console.log(`[${new Date().toISOString()}] CREATE-JOB: Subscription status - ${subscription?.status || "none"}`);
 
     // Parse and validate request body
     let plan: DirectorPlan;
@@ -146,13 +121,13 @@ serve(async (req) => {
       );
     }
     
-    console.log(`[${new Date().toISOString()}] CREATE-JOB: Creating job for emotion "${plan.emotion}"`);
+    console.log(`[${new Date().toISOString()}] CREATE-JOB: Creating job for emotion "${plan.emotion}" user ${userId}`);
 
-    // Create job record using admin client (bypasses RLS - we already verified user)
+    // Create job record using admin client (bypasses RLS)
     const { data: job, error: jobError } = await supabaseAdmin
       .from("jobs")
       .insert({
-        user_id: user.id,
+        user_id: userId,
         status: "queued",
         emotion: plan.emotion,
         lyrics: plan.lyrics || null,
@@ -180,7 +155,6 @@ serve(async (req) => {
     const duration = Date.now() - startTime;
     console.error(`[${new Date().toISOString()}] CREATE-JOB: Unexpected error after ${duration}ms -`, error);
     
-    // Don't leak internal error details to client
     return new Response(
       JSON.stringify({ error: "An unexpected error occurred. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
