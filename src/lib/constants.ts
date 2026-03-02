@@ -1,7 +1,8 @@
-// Job status constants
+// Job status constants (aligned with veosync.ts JobStatus type)
 export const JobStatus = {
   QUEUED: 'queued',
   RUNNING: 'running',
+  READY_FOR_ASSEMBLY: 'ready_for_assembly',
   ASSEMBLING: 'assembling',
   DONE: 'done',
   ERROR: 'error',
@@ -9,15 +10,14 @@ export const JobStatus = {
 
 export type JobStatusType = typeof JobStatus[keyof typeof JobStatus];
 
-// Emotion constants
+// Emotion constants (aligned with veosync.ts Emotion type and emotions.ts)
 export const Emotion = {
-  HAPPY: 'happy',
-  SAD: 'sad',
-  EXCITED: 'excited',
-  CALM: 'calm',
-  ANGRY: 'angry',
-  FEARFUL: 'fearful',
-  SURPRISED: 'surprised',
+  UNFILTERED: 'unfiltered',
+  VULNERABLE: 'vulnerable',
+  UNTOUCHABLE: 'untouchable',
+  NUMB: 'numb',
+  ASCENDING: 'ascending',
+  UNHINGED: 'unhinged',
 } as const;
 
 export type EmotionType = typeof Emotion[keyof typeof Emotion];
