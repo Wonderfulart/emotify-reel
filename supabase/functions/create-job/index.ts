@@ -6,9 +6,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Mock user ID for testing when auth is bypassed
-const MOCK_USER_ID = "00000000-0000-0000-0000-000000000000";
-
 // Validate required environment variables at startup
 const REQUIRED_ENV_VARS = [
   "SUPABASE_URL",
@@ -78,34 +75,29 @@ serve(async (req) => {
   try {
     console.log(`[${new Date().toISOString()}] CREATE-JOB: Request received`);
     
-    // Admin client for database operations (bypasses RLS)
+    // Service role client for all DB operations (bypasses RLS)
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Try to authenticate user (optional for testing)
-    let userId = MOCK_USER_ID;
+    // Resolve user ID from auth header if present
+    let userId: string | null = null;
     const authHeader = req.headers.get("Authorization");
     if (authHeader) {
       const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
       if (anonKey) {
-        const supabaseClient = createClient(
-          Deno.env.get("SUPABASE_URL")!,
-          anonKey
-        );
+        const anonClient = createClient(Deno.env.get("SUPABASE_URL")!, anonKey);
         const token = authHeader.replace("Bearer ", "");
-        const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
-        
-        if (!authError && user) {
-          userId = user.id;
-          console.log(`[${new Date().toISOString()}] CREATE-JOB: User authenticated - ${userId}`);
-        } else {
-          console.log(`[${new Date().toISOString()}] CREATE-JOB: Auth failed, using mock user - ${authError?.message || "No user"}`);
-        }
+        const { data: { user } } = await anonClient.auth.getUser(token);
+        userId = user?.id ?? null;
       }
+    }
+
+    if (userId) {
+      console.log(`[${new Date().toISOString()}] CREATE-JOB: Authenticated user - ${userId}`);
     } else {
-      console.log(`[${new Date().toISOString()}] CREATE-JOB: No auth header, using mock user`);
+      console.log(`[${new Date().toISOString()}] CREATE-JOB: No authenticated user, proceeding as backend-authorized`);
     }
 
     // Parse and validate request body
@@ -118,6 +110,17 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: parseError instanceof Error ? parseError.message : "Invalid request body" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // user_id is required by the DB schema (NOT NULL). 
+    // If no auth user, we still need a valid UUID — use the one from the request context 
+    // or reject if we truly have no user identity.
+    if (!userId) {
+      console.error(`[${new Date().toISOString()}] CREATE-JOB: No user identity available`);
+      return new Response(
+        JSON.stringify({ error: "Authentication required to create a job" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
     
